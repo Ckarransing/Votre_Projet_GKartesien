@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestionnaire de Projets Clients - Kartesien</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- 
+        Chosen Palette: Warm Neutrals (bg-stone-50, text-stone-800, accent-cyan-700)
+        Application Structure Plan: The application is now a small project management dashboard. It has two main views: a 'Dashboard View' to display all client project submissions as cards, and a 'Form View' which is the multi-step questionnaire. This structure allows the user (maître d'œuvre) to manage multiple clients instead of a single-use form. The flow is: User sees dashboard -> Clicks 'Add Project' -> Fills out the wizard -> Submits -> Data is saved to Firestore, a PDF is generated for local download, and a pre-filled email is opened to send the PDF. -> User is returned to the updated dashboard.
+        Visualization & Content Choices: Report Info: Client questionnaire template. Goal: Create a reusable tool for client data collection and management. Viz/Presentation: A dashboard of project cards (HTML/CSS) and an interactive multi-step form. Interactions: View switching, form submission to Firestore, dynamic rendering of project cards from Firestore data, PDF generation on submit, and a new modal for viewing project details. A mailto link is now triggered on submission to facilitate emailing the generated PDF. Justification: This dashboard structure is far more useful for a professional managing multiple projects. The mailto link streamlines the process of sharing the client summary. Library: Vanilla JS, jsPDF, Firebase, Tailwind CSS.
+        CONFIRMATION: NO SVG graphics used. NO Mermaid JS used.
+    -->
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .view {
+            display: none;
+        }
+        .view.active {
+            display: block;
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        .step {
+            display: none;
+        }
+        .step.active {
+            display: block;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .progress-bar-fill {
+            transition: width 0.4s ease-in-out;
+        }
+        .loader {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .modal {
+            transition: opacity 0.3s ease;
+        }
+    </style>
+</head>
+<body class="bg-stone-100 text-stone-800">
+
+    <div id="app-container" class="w-full max-w-5xl mx-auto p-4 md:p-8">
+
+        <!-- Dashboard View -->
+        <div id="dashboard-view" class="view active">
+            <div class="flex justify-between items-center mb-8">
+                <div>
+                    <h1 class="text-3xl md:text-4xl font-bold text-cyan-800">Tableau de Bord des Projets</h1>
+                    <p class="mt-1 text-stone-600">Gérez ici les fiches d'information de vos clients.</p>
+                </div>
+                <button id="add-project-btn" class="bg-cyan-600 text-white font-semibold py-2 px-5 rounded-lg hover:bg-cyan-700 transition flex items-center gap-2">
+                    <i class="fas fa-plus"></i>
+                    <span class="hidden md:inline">Ajouter un Projet</span>
+                </button>
+            </div>
+            <div id="project-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Project cards will be injected here -->
+                <div id="loader-container" class="col-span-full flex flex-col items-center justify-center p-10 bg-white rounded-lg shadow-sm border">
+                    <div class="loader !border-stone-200 !border-t-cyan-600"></div>
+                    <p class="mt-4 text-stone-500">Chargement des projets...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Form View -->
+        <div id="form-view" class="view">
+            <div class="w-full bg-white rounded-2xl shadow-xl p-6 md:p-10 border border-stone-200">
+                <div class="flex justify-between items-start mb-8">
+                    <div>
+                        <h1 class="text-3xl md:text-4xl font-bold text-cyan-800">Fiche d'Information Projet</h1>
+                        <p class="mt-2 text-stone-600">Guidez votre client à travers les étapes.</p>
+                    </div>
+                    <button id="back-to-dashboard-btn" class="text-stone-500 hover:text-cyan-700 transition">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+
+                <!-- Progress Bar -->
+                <div class="mb-8">
+                    <div id="progress-bar-container" class="relative w-full h-2 bg-stone-200 rounded-full">
+                        <div id="progress-bar-fill" class="absolute top-0 left-0 h-full bg-cyan-600 rounded-full"></div>
+                    </div>
+                    <div id="step-labels" class="flex justify-between mt-2 text-xs md:text-sm text-stone-500">
+                        <span class="font-medium text-cyan-700">Général</span>
+                        <span>Existant</span>
+                        <span>Projet</span>
+                        <span>Cadre</span>
+                        <span>Récapitulatif</span>
+                    </div>
+                </div>
+
+                <form id="project-form">
+                    <!-- Step 1: Informations Générales -->
+                    <div id="step-1" class="step active">
+                        <h2 class="text-2xl font-semibold mb-6 text-stone-700">1. Informations Générales</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label for="fullName" class="block text-sm font-medium text-stone-700 mb-1">Nom et Prénom *</label>
+                                <input type="text" id="fullName" name="fullName" required class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                            </div>
+                            <div>
+                                <label for="phone" class="block text-sm font-medium text-stone-700 mb-1">Numéro de Téléphone *</label>
+                                <input type="tel" id="phone" name="phone" required class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="email" class="block text-sm font-medium text-stone-700 mb-1">Adresse Email *</label>
+                                <input type="email" id="email" name="email" required class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="projectAddress" class="block text-sm font-medium text-stone-700 mb-1">Adresse du Projet (si différente)</label>
+                                <textarea id="projectAddress" name="projectAddress" rows="2" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition"></textarea>
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-sm font-medium text-stone-700 mb-2">Type de projet *</label>
+                                <div class="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                                    <label class="flex items-center p-3 border border-stone-300 rounded-lg hover:bg-cyan-50 cursor-pointer"><input type="checkbox" name="projectType" value="Construction neuve" class="h-4 w-4 text-cyan-600 border-stone-300 focus:ring-cyan-500 mr-3">Construction neuve</label>
+                                    <label class="flex items-center p-3 border border-stone-300 rounded-lg hover:bg-cyan-50 cursor-pointer"><input type="checkbox" name="projectType" value="Rénovation" class="h-4 w-4 text-cyan-600 border-stone-300 focus:ring-cyan-500 mr-3">Rénovation</label>
+                                    <label class="flex items-center p-3 border border-stone-300 rounded-lg hover:bg-cyan-50 cursor-pointer"><input type="checkbox" name="projectType" value="Extension" class="h-4 w-4 text-cyan-600 border-stone-300 focus:ring-cyan-500 mr-3">Extension</label>
+                                    <label class="flex items-center p-3 border border-stone-300 rounded-lg hover:bg-cyan-50 cursor-pointer"><input type="checkbox" name="projectType" value="Aménagement" class="h-4 w-4 text-cyan-600 border-stone-300 focus:ring-cyan-500 mr-3">Aménagement</label>
+                                </div>
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="propertyStatus" class="block text-sm font-medium text-stone-700 mb-1">Maîtrise du bien/terrain *</label>
+                                <select id="propertyStatus" name="propertyStatus" required class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                                    <option value="" disabled selected>Où en êtes-vous ?</option>
+                                    <option value="Déjà propriétaire">Je suis déjà propriétaire</option>
+                                    <option value="Compromis signé">J'ai signé un compromis de vente</option>
+                                    <option value="En recherche">Je suis encore en recherche</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Description de l'Existant -->
+                    <div id="step-2" class="step">
+                        <h2 class="text-2xl font-semibold mb-6 text-stone-700">2. Description de l'Existant</h2>
+                        <p class="text-sm text-stone-500 mb-6 -mt-4">Cette section concerne les projets de rénovation ou d'extension.</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label for="buildYear" class="block text-sm font-medium text-stone-700 mb-1">Année de construction (approx.)</label>
+                                <input type="number" id="buildYear" name="buildYear" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                            </div>
+                            <div>
+                                <label for="currentSurface" class="block text-sm font-medium text-stone-700 mb-1">Surface habitable actuelle (m²)</label>
+                                <input type="number" id="currentSurface" name="currentSurface" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label for="strengthsWeaknesses" class="block text-sm font-medium text-stone-700 mb-1">Points forts et points faibles du logement actuel</label>
+                                <textarea id="strengthsWeaknesses" name="strengthsWeaknesses" rows="3" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition"></textarea>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Votre Projet -->
+                    <div id="step-3" class="step">
+                        <h2 class="text-2xl font-semibold mb-6 text-stone-700">3. Le Programme de Votre Projet</h2>
+                        <div class="space-y-6">
+                            <div>
+                                <label for="projectGoal" class="block text-sm font-medium text-stone-700 mb-1">Objectif principal du projet *</label>
+                                <textarea id="projectGoal" name="projectGoal" required rows="3" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition" placeholder="Ex: Agrandir la pièce de vie, créer une suite parentale..."></textarea>
+                            </div>
+                            <div>
+                                <label for="roomsToCreate" class="block text-sm font-medium text-stone-700 mb-1">Pièces à créer ou réaménager</label>
+                                <textarea id="roomsToCreate" name="roomsToCreate" rows="4" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition" placeholder="Décrivez vos attentes pour chaque pièce : ambiance, fonctions, surface..."></textarea>
+                            </div>
+                             <div>
+                                <label for="projectStyle" class="block text-sm font-medium text-stone-700 mb-1">Style architectural / Ambiance générale</label>
+                                <input type="text" id="projectStyle" name="projectStyle" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition" placeholder="Ex: Moderne, traditionnel, chaleureux, épuré...">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 4: Cadre du Projet -->
+                    <div id="step-4" class="step">
+                        <h2 class="text-2xl font-semibold mb-6 text-stone-700">4. Budget et Délais</h2>
+                        <div class="space-y-6">
+                            <div>
+                                <label for="budget" class="block text-sm font-medium text-stone-700 mb-1">Enveloppe budgétaire globale (travaux et honoraires inclus) *</label>
+                                <select id="budget" name="budget" required class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition">
+                                    <option value="" disabled selected>Sélectionnez une fourchette</option>
+                                    <option value="< 100 000 €">Moins de 100 000 €</option>
+                                    <option value="100 000 € - 200 000 €">100 000 € - 200 000 €</option>
+                                    <option value="200 000 € - 300 000 €">200 000 € - 300 000 €</option>
+                                    <option value="300 000 € - 500 000 €">300 000 € - 500 000 €</option>
+                                    <option value="> 500 000 €">Plus de 500 000 €</option>
+                                    <option value="Je ne sais pas / Préfère en discuter">Je ne sais pas / Préfère en discuter</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="timeline" class="block text-sm font-medium text-stone-700 mb-1">Impératifs de calendrier</label>
+                                <textarea id="timeline" name="timeline" rows="3" class="w-full p-3 border border-stone-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition" placeholder="Date de démarrage souhaitée, date d'emménagement impérative..."></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Step 5: Récapitulatif et Soumission -->
+                    <div id="step-5" class="step">
+                        <h2 class="text-2xl font-semibold mb-6 text-stone-700">5. Récapitulatif du Projet</h2>
+                        <div id="summary-content" class="space-y-4 bg-stone-100 p-6 rounded-lg border border-stone-200"></div>
+                        <p class="text-xs text-stone-500 mt-4">Veuillez vérifier les informations avant de soumettre.</p>
+                    </div>
+
+                    <!-- Navigation Buttons -->
+                    <div class="mt-10 flex justify-between">
+                        <button type="button" id="prev-btn" class="bg-stone-200 text-stone-700 font-semibold py-2 px-6 rounded-lg hover:bg-stone-300 transition disabled:opacity-50 disabled:cursor-not-allowed">Précédent</button>
+                        <button type="button" id="next-btn" class="bg-cyan-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-cyan-700 transition">Suivant</button>
+                        <button type="submit" id="submit-btn" class="bg-green-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-green-700 transition flex items-center justify-center gap-2" style="display: none;">
+                            <span id="submit-btn-text">Soumettre et Générer PDF</span>
+                            <div id="submit-loader" class="loader hidden"></div>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Details Modal -->
+        <div id="details-modal" class="modal fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center p-4">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div class="p-6 border-b flex justify-between items-center sticky top-0 bg-white">
+                    <h2 class="text-2xl font-bold text-cyan-800">Détails du Projet</h2>
+                    <button id="close-modal-btn" class="text-stone-500 hover:text-red-600 transition">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+                <div id="modal-content" class="p-8">
+                    <!-- Modal content injected here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        document.addEventListener('DOMContentLoaded', function () {
+            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+            const app = initializeApp(firebaseConfig);
+            const auth = getAuth(app);
+            const db = getFirestore(app);
+
+            let userId = null;
+            let allProjects = [];
+
+            const { jsPDF } = window.jspdf;
+            
+            const dashboardView = document.getElementById('dashboard-view');
+            const formView = document.getElementById('form-view');
+            const addProjectBtn = document.getElementById('add-project-btn');
+            const backToDashboardBtn = document.getElementById('back-to-dashboard-btn');
+            const projectList = document.getElementById('project-list');
+            const loaderContainer = document.getElementById('loader-container');
+            const detailsModal = document.getElementById('details-modal');
+            const closeModalBtn = document.getElementById('close-modal-btn');
+            const modalContent = document.getElementById('modal-content');
+            
+            const steps = document.querySelectorAll('.step');
+            const prevBtn = document.getElementById('prev-btn');
+            const nextBtn = document.getElementById('next-btn');
+            const submitBtn = document.getElementById('submit-btn');
+            const submitBtnText = document.getElementById('submit-btn-text');
+            const submitLoader = document.getElementById('submit-loader');
+            const form = document.getElementById('project-form');
+            const progressBarFill = document.getElementById('progress-bar-fill');
+            const stepLabels = document.querySelectorAll('#step-labels span');
+
+            let currentStep = 1;
+            const totalSteps = 5; 
+            let renovationProject = false;
+
+            function showView(viewId) {
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                document.getElementById(viewId).classList.add('active');
+            }
+
+            addProjectBtn.addEventListener('click', () => showView('form-view'));
+            backToDashboardBtn.addEventListener('click', () => {
+                resetForm();
+                showView('dashboard-view');
+            });
+
+            function updateProgress() {
+                const progressPercentage = ((currentStep - 1) / (totalSteps - 1)) * 100;
+                progressBarFill.style.width = `${progressPercentage}%`;
+                stepLabels.forEach((label, index) => {
+                    label.classList.toggle('text-cyan-700', index < currentStep);
+                    label.classList.toggle('font-medium', index < currentStep);
+                    label.classList.toggle('text-stone-500', index >= currentStep);
+                });
+            }
+
+            function showStep(stepNumber) {
+                steps.forEach(step => step.classList.remove('active'));
+                document.getElementById(`step-${stepNumber}`).classList.add('active');
+                updateProgress();
+                prevBtn.disabled = stepNumber === 1;
+                
+                nextBtn.style.display = stepNumber === totalSteps ? 'none' : 'block';
+                submitBtn.style.display = stepNumber === totalSteps ? 'block' : 'none';
+                if (stepNumber === totalSteps) generateSummary();
+            }
+            
+            function isStep2Required() {
+                const projectTypes = Array.from(document.querySelectorAll('input[name="projectType"]:checked')).map(cb => cb.value);
+                return projectTypes.some(type => type.includes('Rénovation') || type.includes('Extension') || type.includes('Aménagement'));
+            }
+            
+            function validateStep(stepNumber) {
+                const currentStepDiv = document.getElementById(`step-${stepNumber}`);
+                const inputs = currentStepDiv.querySelectorAll('input[required], select[required], textarea[required]');
+                let isValid = true;
+                inputs.forEach(input => {
+                    input.classList.remove('border-red-500');
+                    if (!input.value.trim()) {
+                        isValid = false;
+                        input.classList.add('border-red-500');
+                    }
+                });
+                
+                if (stepNumber === 1) {
+                    const projectTypeCheckboxes = currentStepDiv.querySelectorAll('input[name="projectType"]');
+                    const isChecked = Array.from(projectTypeCheckboxes).some(cb => cb.checked);
+                    const groupContainer = projectTypeCheckboxes[0].closest('.grid');
+                    if (!isChecked) {
+                        isValid = false;
+                        groupContainer.classList.add('border', 'border-red-500', 'rounded-lg', 'p-2');
+                    } else {
+                        groupContainer.classList.remove('border', 'border-red-500', 'p-2');
+                    }
+                }
+                return isValid;
+            }
+
+            nextBtn.addEventListener('click', () => {
+                if (!validateStep(currentStep)) return;
+                if (currentStep === 1) {
+                     renovationProject = isStep2Required();
+                     if (!renovationProject) currentStep += 2; else currentStep++;
+                } else if (currentStep < totalSteps) {
+                    currentStep++;
+                }
+                showStep(currentStep);
+            });
+
+            prevBtn.addEventListener('click', () => {
+                if (currentStep > 1) {
+                     if (currentStep === 3 && !renovationProject) currentStep -= 2; else currentStep--;
+                }
+                showStep(currentStep);
+            });
+
+            function generateSummary(data) {
+                const summaryContainer = data ? null : document.getElementById('summary-content');
+                const formData = data ? null : new FormData(form);
+                const summaryData = data || {};
+                
+                if(!data) {
+                    formData.forEach((value, key) => {
+                        if (!summaryData[key]) summaryData[key] = [];
+                        summaryData[key].push(value);
+                    });
+                }
+
+                let html = '<dl class="divide-y divide-stone-200">';
+                const fieldLabels = {
+                    'fullName': 'Nom complet', 'phone': 'Téléphone', 'email': 'Email',
+                    'projectAddress': 'Adresse du projet', 'projectType': 'Type de projet',
+                    'propertyStatus': 'Statut de la propriété', 'buildYear': 'Année de construction',
+                    'currentSurface': 'Surface actuelle (m²)', 'strengthsWeaknesses': 'Points forts/faibles',
+                    'projectGoal': 'Objectif du projet', 'roomsToCreate': 'Pièces à créer/réaménager', 
+                    'projectStyle': 'Style / Ambiance', 'budget': 'Budget', 'timeline': 'Calendrier'
+                };
+
+                for (const key in fieldLabels) {
+                    const value = Array.isArray(summaryData[key]) ? summaryData[key].join(', ') : summaryData[key];
+                    if (value && value.trim() !== '') {
+                        html += `<div class="py-3 grid grid-cols-3 gap-4">
+                                    <dt class="text-sm font-medium text-stone-600">${fieldLabels[key]}</dt>
+                                    <dd class="text-sm text-stone-900 col-span-2">${value}</dd>
+                                 </div>`;
+                    }
+                }
+                html += '</dl>';
+                
+                if (summaryContainer) {
+                    summaryContainer.innerHTML = html;
+                }
+                return html;
+            }
+            
+            function displayProjectDetails(project) {
+                modalContent.innerHTML = generateSummary(project);
+                detailsModal.classList.remove('hidden');
+                detailsModal.classList.add('flex');
+            }
+            
+            closeModalBtn.addEventListener('click', () => {
+                detailsModal.classList.add('hidden');
+                detailsModal.classList.remove('flex');
+            });
+
+            detailsModal.addEventListener('click', (e) => {
+                if (e.target === detailsModal) {
+                    closeModalBtn.click();
+                }
+            });
+
+            projectList.addEventListener('click', (e) => {
+                if (e.target.classList.contains('details-btn')) {
+                    const projectId = e.target.dataset.projectId;
+                    const project = allProjects.find(p => p.id === projectId);
+                    if (project) {
+                        displayProjectDetails(project);
+                    }
+                }
+            });
+            
+            function generatePDF(data) {
+                const doc = new jsPDF();
+                doc.setFontSize(22);
+                doc.setFont('helvetica', 'bold');
+                doc.text("Récapitulatif du Projet Client", 105, 20, { align: 'center' });
+                doc.setFontSize(11);
+                doc.setFont('helvetica', 'normal');
+                const submissionDate = data.submissionDate instanceof Date ? data.submissionDate : data.submissionDate.toDate();
+                doc.text(`Date: ${submissionDate.toLocaleDateString('fr-FR')}`, 105, 30, { align: 'center' });
+
+                let yPosition = 45;
+                const fieldLabels = {
+                    'fullName': 'Nom complet', 'phone': 'Téléphone', 'email': 'Email', 'projectAddress': 'Adresse du projet', 'projectType': 'Type de projet', 'propertyStatus': 'Statut de la propriété', 'buildYear': 'Année de construction', 'currentSurface': 'Surface actuelle (m²)', 'strengthsWeaknesses': 'Points forts/faibles', 'projectGoal': 'Objectif du projet', 'roomsToCreate': 'Pièces à créer/réaménager', 'projectStyle': 'Style / Ambiance', 'budget': 'Budget', 'timeline': 'Calendrier'
+                };
+
+                function addSection(title, fields) {
+                    const sectionData = Object.keys(fields).filter(key => data[key] && data[key].toString().trim() !== '');
+                    if (sectionData.length === 0) return;
+
+                    doc.setFontSize(14);
+                    doc.setFont('helvetica', 'bold');
+                    doc.text(title, 14, yPosition);
+                    yPosition += 8;
+                    doc.setLineWidth(0.5);
+                    doc.line(14, yPosition - 3, 196, yPosition - 3);
+
+                    for (const key in fields) {
+                        if (data[key] && data[key].toString().trim() !== '') {
+                            doc.setFontSize(11);
+                            doc.setFont('helvetica', 'bold');
+                            doc.text(`${fields[key]}:`, 16, yPosition);
+                            doc.setFont('helvetica', 'normal');
+                            const value = Array.isArray(data[key]) ? data[key].join(', ') : data[key];
+                            const textLines = doc.splitTextToSize(value, 120);
+                            doc.text(textLines, 70, yPosition);
+                            yPosition += (textLines.length * 5) + 4;
+                            if(yPosition > 280) { doc.addPage(); yPosition = 20; }
+                        }
+                    }
+                    yPosition += 5;
+                }
+
+                addSection("Informations Générales", { 'fullName': 'Nom complet', 'phone': 'Téléphone', 'email': 'Email', 'projectAddress': 'Adresse du projet', 'projectType': 'Type de projet', 'propertyStatus': 'Statut de la propriété' });
+                if (isStep2Required()) {
+                    addSection("Description de l'Existant", { 'buildYear': 'Année de construction', 'currentSurface': 'Surface actuelle (m²)', 'strengthsWeaknesses': 'Points forts/faibles' });
+                }
+                addSection("Programme du Projet", { 'projectGoal': 'Objectif du projet', 'roomsToCreate': 'Pièces à créer/réaménager', 'projectStyle': 'Style / Ambiance' });
+                addSection("Cadre du Projet", { 'budget': 'Budget', 'timeline': 'Calendrier' });
+                
+                return doc;
+            }
+
+            form.addEventListener('submit', async function (e) {
+                e.preventDefault();
+                submitBtnText.classList.add('hidden');
+                submitLoader.classList.remove('hidden');
+                submitBtn.disabled = true;
+
+                const formData = new FormData(form);
+                const projectData = {};
+                formData.forEach((value, key) => {
+                    if (form.querySelector(`[name="${key}"]`).type === 'checkbox') {
+                        if (!projectData[key]) projectData[key] = [];
+                        projectData[key].push(value);
+                    } else {
+                        projectData[key] = value;
+                    }
+                });
+                projectData.submissionDate = new Date();
+                projectData.status = 'Nouveau';
+
+                try {
+                    // Save to Firestore
+                    const docRef = await addDoc(collection(db, `artifacts/${appId}/users/${userId}/projects`), projectData);
+                    
+                    // Generate PDF
+                    const pdf = generatePDF(projectData);
+                    pdf.save(`Fiche_Projet_${projectData.fullName ? projectData.fullName.replace(/ /g,"_") : 'Client'}.pdf`);
+
+                    // Prepare and open mailto link
+                    let emailBody = "Bonjour,\n\nVeuillez trouver ci-joint le récapitulatif du projet pour notre client.\n\nCordialement,\n\n";
+                    const subject = `Nouveau projet - ${projectData.fullName || 'Contact'}`;
+                    const mailtoLink = `mailto:c.karransing@kartesien.fr?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(emailBody)}`;
+                    window.location.href = mailtoLink;
+
+                    // Reset and go back to dashboard
+                    resetForm();
+                    showView('dashboard-view');
+
+                } catch (error) {
+                    console.error("Error during submission: ", error);
+                    alert("Erreur lors de la sauvegarde ou de l'envoi du projet.");
+                } finally {
+                    submitBtnText.classList.remove('hidden');
+                    submitLoader.classList.add('hidden');
+                    submitBtn.disabled = false;
+                }
+            });
+
+            function resetForm() {
+                form.reset();
+                currentStep = 1;
+                showStep(1);
+            }
+            
+            function renderProjects(projects) {
+                projectList.innerHTML = '';
+                if (projects.length === 0) {
+                    projectList.innerHTML = `<div class="col-span-full text-center p-10 bg-white rounded-lg shadow-sm border">
+                        <p class="text-stone-500">Aucun projet pour le moment.</p>
+                        <p class="text-sm text-stone-400 mt-2">Cliquez sur "Ajouter un Projet" pour commencer.</p>
+                    </div>`;
+                    return;
+                }
+
+                projects.forEach(project => {
+                    const card = document.createElement('div');
+                    card.className = "bg-white p-6 rounded-lg shadow-sm border border-stone-200 flex flex-col justify-between";
+                    const submissionDate = project.submissionDate.toDate().toLocaleDateString('fr-FR');
+                    const projectType = Array.isArray(project.projectType) ? project.projectType.join(', ') : project.projectType;
+
+                    card.innerHTML = `
+                        <div>
+                            <p class="text-xs text-cyan-600 font-semibold">${project.status.toUpperCase()}</p>
+                            <h3 class="font-bold text-lg text-stone-800 mt-1">${project.fullName}</h3>
+                            <p class="text-sm text-stone-500">${projectType || 'Type non défini'}</p>
+                            <p class="text-sm text-stone-500 mt-1"><i class="fas fa-map-marker-alt fa-fw mr-1 text-stone-400"></i> ${project.projectAddress || 'Adresse non spécifiée'}</p>
+                        </div>
+                        <div class="mt-4 pt-4 border-t border-stone-200 text-xs text-stone-400 flex justify-between items-center">
+                            <span><i class="fas fa-calendar-alt fa-fw mr-1"></i> ${submissionDate}</span>
+                            <button class="details-btn text-cyan-600 hover:text-cyan-800 font-semibold" data-project-id="${project.id}">Voir détails</button>
+                        </div>
+                    `;
+                    projectList.appendChild(card);
+                });
+            }
+
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    const projectsCol = collection(db, `artifacts/${appId}/users/${userId}/projects`);
+                    const q = query(projectsCol, orderBy("submissionDate", "desc"));
+                    
+                    onSnapshot(q, (snapshot) => {
+                        allProjects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        loaderContainer.style.display = 'none';
+                        renderProjects(allProjects);
+                    }, (error) => {
+                        console.error("Error fetching projects:", error);
+                        loaderContainer.innerHTML = '<p class="text-red-500">Erreur lors du chargement des projets.</p>';
+                    });
+
+                } else {
+                    signInAnonymously(auth).catch((error) => {
+                        console.error("Anonymous sign-in failed:", error);
+                        loaderContainer.innerHTML = '<p class="text-red-500">Erreur d\'authentification.</p>';
+                    });
+                }
+            });
+        });
+    </script>
+
+</body>
+</html>
